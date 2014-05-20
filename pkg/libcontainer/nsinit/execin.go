@@ -5,8 +5,6 @@ package nsinit
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"github.com/dotcloud/docker/pkg/label"
@@ -33,30 +31,9 @@ func ExecIn(container *libcontainer.Container, nspid int, args []string) (int, e
 			}
 		}
 	}
-	fds, err := getNsFds(nspid, container)
-	closeFds := func() {
-		for _, f := range fds {
-			system.Closefd(f)
-		}
-	}
-	if err != nil {
-		closeFds()
-		return -1, err
-	}
 	processLabel, err := label.GetPidCon(nspid)
 	if err != nil {
-		closeFds()
 		return -1, err
-	}
-	// foreach namespace fd, use setns to join an existing container's namespaces
-	for _, fd := range fds {
-		if fd > 0 {
-			if err := system.Setns(fd, 0); err != nil {
-				closeFds()
-				return -1, fmt.Errorf("setns %s", err)
-			}
-		}
-		system.Closefd(fd)
 	}
 
 	// if the container has a new pid and mount namespace we need to
@@ -89,33 +66,16 @@ func ExecIn(container *libcontainer.Container, nspid int, args []string) (int, e
 		}
 		os.Exit(state.Sys().(syscall.WaitStatus).ExitStatus())
 	}
+
 dropAndExec:
-	if err := FinalizeNamespace(container); err != nil {
-		return -1, err
-	}
 	err = label.SetProcessLabel(processLabel)
 	if err != nil {
 		return -1, err
 	}
-	if err := system.Execv(args[0], args[0:], container.Env); err != nil {
+
+	nsenter_args := append([]string{"nsenter", "--target", fmt.Sprintf("%v", nspid), "--mount", "--uts", "--ipc", "--net", "--pid"}, args...)
+	if err := system.Execv(nsenter_args[0], nsenter_args[0:], container.Env); err != nil {
 		return -1, err
 	}
 	panic("unreachable")
-}
-
-func getNsFds(pid int, container *libcontainer.Container) ([]uintptr, error) {
-	fds := []uintptr{}
-
-	for key, enabled := range container.Namespaces {
-		if enabled {
-			if ns := libcontainer.GetNamespace(key); ns != nil {
-				f, err := os.OpenFile(filepath.Join("/proc/", strconv.Itoa(pid), "ns", ns.File), os.O_RDONLY, 0)
-				if err != nil {
-					return fds, err
-				}
-				fds = append(fds, f.Fd())
-			}
-		}
-	}
-	return fds, nil
 }
